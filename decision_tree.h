@@ -7,6 +7,7 @@
 #include <ranges>
 #include <unordered_map>
 #include <cmath>
+#include <algorithm>
 
 struct DataPoint {
     std::vector<double> features;
@@ -59,6 +60,64 @@ private:
     Node* root;
     int max_depth;
 
+    struct SplitInfo {
+        int feature_index;
+        double threshold;
+        double information_gain;
+        std::vector<int> left_indices;
+        std::vector<int> right_indices;
+
+        SplitInfo() : feature_index(-1), threshold(0.0), information_gain(-1.0) {}
+    };
+
+    SplitInfo find_best_split(const std::vector<DataPoint>& data, const std::vector<int>& indices) {
+        SplitInfo best_split;
+        best_split.left_indices = indices;
+        best_split.right_indices = {};
+
+
+        int num_features = data[0].features.size();
+        for (int feature_index = 0; feature_index < num_features; ++feature_index) {
+            double threshold = 0.0;
+
+            std::vector<double> feature_values;
+            for (int idx : indices) {
+                feature_values.push_back(data[idx].features[feature_index]);
+            }
+
+            std::sort(feature_values.begin(), feature_values.end());
+            for (int i = 0; i < feature_values.size()-1; ++i) {
+                threshold = ((static_cast<double>(feature_values[i] + feature_values[i+1])) / 2);
+                auto [left_indices, right_indices] = split_data(data, indices, feature_index, threshold);
+                double info_gain = calculate_information_gain(data, indices, left_indices, right_indices);
+                if (info_gain > best_split.information_gain) {
+                    best_split.feature_index = feature_index;
+                    best_split.threshold = threshold;
+                    best_split.information_gain = info_gain;
+                    best_split.left_indices = left_indices;
+                    best_split.right_indices = right_indices;
+                }
+            }
+        }
+        return best_split;
+    }
+
+    std::pair<std::vector<int>, std::vector<int>> split_data(const std::vector<DataPoint>& data,
+            const std::vector<int>& indices, int feature_index, double threshold) {
+
+        std::vector<int> left_idx;
+        std::vector<int> right_idx;
+
+        for (int idx : indices) {
+            if (data[idx].features[feature_index] <= threshold) {
+                left_idx.push_back(idx);
+            } else {
+                right_idx.push_back(idx);
+            }
+        }
+
+        return std::pair{left_idx, right_idx};
+    }
 
     static std::vector<std::pair<int, double>> calculate_probabilities(const std::vector<DataPoint>& data, const std::vector<int>& indices) {
         int total = indices.size();
@@ -157,25 +216,6 @@ private:
         return new InternalNode(feature_index, threshold, left_child, right_child); //заглушка
     }
 
-
-
-
-    std::pair<std::vector<int>, std::vector<int>> split_data(const std::vector<DataPoint>& data,
-        const std::vector<int>& indices, int feature_index, double threshold) {
-
-        std::vector<int> left_idx;
-        std::vector<int> right_idx;
-
-        for (int idx : indices) {
-            if (data[idx].features[feature_index] <= threshold) {
-                left_idx.push_back(idx);
-            } else {
-                right_idx.push_back(idx);
-            }
-        }
-
-        return std::pair{left_idx, right_idx};
-    }
 
 public:
     DecisionTree() : root(nullptr), max_depth(32) {}
