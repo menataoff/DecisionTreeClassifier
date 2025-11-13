@@ -20,16 +20,31 @@ class Node {
 public:
     virtual ~Node() = default;
     virtual int predict(const std::vector<double>& features) const = 0;
-
+    virtual std::unordered_map<int, double> predict_proba(const std::vector<double>& features) const = 0;
 };
 
 class LeafNode : public Node {
 private:
-    int class_label;
+    std::unordered_map<int, double> class_probabilities;
+    int majority_class;
 public:
-    LeafNode(int class_label) : class_label(class_label) {}
+    LeafNode(std::unordered_map<int, double> class_probabilities) : class_probabilities(class_probabilities) {
+        majority_class = 0;
+        double max_prob = 0.0;
+        for (const auto& [class_label, prob] : class_probabilities) {
+            if (prob > max_prob) {
+                majority_class = class_label;
+                max_prob = prob;
+            }
+        }
+    }
+
+    std::unordered_map<int, double> predict_proba(const std::vector<double>& features) const override{
+        return class_probabilities;
+    }
+
     int predict(const std::vector<double>& features) const override {
-        return class_label;
+        return majority_class;
     }
 };
 
@@ -49,16 +64,32 @@ public:
             return right_child->predict(features);
         }
     }
+
+    std::unordered_map<int, double> predict_proba(const std::vector<double>& features) const override {
+        if (features[feature_index] <= threshold) {
+            return left_child->predict_proba(features);
+        } else {
+            return right_child->predict_proba(features);
+        }
+    }
+
     ~InternalNode() {
         delete left_child;
         delete right_child;
     }
 };
 
+enum class SplitCriterion { ENTROPY, GINI };
+
 class DecisionTree {
 private:
-    Node* root;
-    int max_depth;
+    Node* root = nullptr;
+    int max_depth = 32;
+    int min_samples_split = 2;
+    int min_samples_leaf = 1;
+    std::vector<double> feature_importances;
+    SplitCriterion criterion = SplitCriterion::ENTROPY;
+
 
     struct SplitInfo {
         int feature_index;
@@ -72,9 +103,6 @@ private:
 
     SplitInfo find_best_split(const std::vector<DataPoint>& data, const std::vector<int>& indices) {
         SplitInfo best_split;
-        best_split.left_indices = indices;
-        best_split.right_indices = {};
-
 
         int num_features = data[0].features.size();
         for (int feature_index = 0; feature_index < num_features; ++feature_index) {
@@ -86,14 +114,15 @@ private:
             }
 
             std::sort(feature_values.begin(), feature_values.end());
+
             for (int i = 0; i < feature_values.size()-1; ++i) {
                 threshold = ((static_cast<double>(feature_values[i] + feature_values[i+1])) / 2);
                 auto [left_indices, right_indices] = split_data(data, indices, feature_index, threshold);
-                double info_gain = calculate_information_gain(data, indices, left_indices, right_indices);
-                if (info_gain > best_split.information_gain) {
+                double gain = calculate_impurity_gain(data, indices, left_indices, right_indices);
+                if (gain > best_split.information_gain) {
                     best_split.feature_index = feature_index;
                     best_split.threshold = threshold;
-                    best_split.information_gain = info_gain;
+                    best_split.information_gain = gain;
                     best_split.left_indices = left_indices;
                     best_split.right_indices = right_indices;
                 }
@@ -119,25 +148,38 @@ private:
         return std::pair{left_idx, right_idx};
     }
 
-    static std::vector<std::pair<int, double>> calculate_probabilities(const std::vector<DataPoint>& data, const std::vector<int>& indices) {
+    static std::unordered_map<int, double> calculate_probabilities(const std::vector<DataPoint>& data, const std::vector<int>& indices) {
         int total = indices.size();
         std::unordered_map<int, int> class_counts;
 
+
+        std::unordered_map<int, double> labels_probabilities;
+
+
         for (int idx : indices) {
-            int label = data[idx].label;
-            class_counts[label]++;
+            class_counts[data[idx].label]++;
         }
-        std::vector<std::pair<int, double>> labels_probabilities;
+
         for (const auto& [class_label, count] : class_counts) {
-            labels_probabilities.push_back(std::pair<int, double>(class_label, (static_cast<double>(count)/total)));
+            labels_probabilities[class_label] = (static_cast<double>(count)/total);
         }
+
         return labels_probabilities;
+    }
+
+    static double calculate_gini(const std::vector<DataPoint>& data, const std::vector<int>& indices) {
+        double gini = 1.0;
+        auto probabilities = calculate_probabilities(data, indices);
+        for (const auto& [label, prob] : probabilities) {
+            gini -= prob * prob;
+        }
+        return gini;
     }
 
     static double calculate_entropy(const std::vector<DataPoint>& data, const std::vector<int>& indices) {
         double entropy = 0.0;
-        std::vector<std::pair<int, double>> labels_probabilities = calculate_probabilities(data, indices);
-        for (auto [label, probability] : labels_probabilities) {
+        std::unordered_map<int, double> labels_probabilities = calculate_probabilities(data, indices);
+        for (const auto& [label, probability] : labels_probabilities) {
             if (probability != 0.0) {
                 entropy -= probability * std::log2(probability);
             } else {
@@ -145,6 +187,15 @@ private:
             }
         }
         return entropy;
+    }
+
+    static double calculate_gini_gain(const std::vector<DataPoint>& data, const std::vector<int>& parent_indices,
+                const std::vector<int>& left_indices, const std::vector<int>& right_indices) {
+        double gini_gain = 0.0;
+        double parent_gini = calculate_gini(data, parent_indices);
+        double left_gini= calculate_gini(data, left_indices);
+        double right_gini = calculate_gini(data, right_indices);
+        return parent_gini - ((static_cast<double>(left_indices.size()) / parent_indices.size())*left_gini + (static_cast<double>(right_indices.size()) / parent_indices.size())*right_gini);
     }
 
     static double calculate_information_gain(const std::vector<DataPoint>& data, const std::vector<int>& parent_indices,
@@ -156,7 +207,14 @@ private:
         return parent_entropy - ((static_cast<double>(left_indices.size()) / parent_indices.size())*left_entropy + (static_cast<double>(right_indices.size()) / parent_indices.size())*right_entropy);
     }
 
-
+    double calculate_impurity_gain(const std::vector<DataPoint>& data, const std::vector<int>& parent_indices,
+                const std::vector<int>& left_indices, const std::vector<int>& right_indices) {
+        if (criterion == SplitCriterion::ENTROPY) {
+            return calculate_information_gain(data, parent_indices, left_indices, right_indices);
+        } else {
+            return calculate_gini_gain(data, parent_indices, left_indices, right_indices);
+        }
+    }
 
     bool all_same_class(const std::vector<DataPoint>& data, const std::vector<int>& indices) {
         if (indices.empty()) return true;
@@ -190,36 +248,75 @@ private:
         return majority_class;
     }
 
+
     Node* build_tree(const std::vector<DataPoint>& data,
         const std::vector<int>& indices,
-        int depth) {
+        int depth, int total_samples) {
 
-        int feature_index = 0;
-        double threshold = 0.5;
+        auto probabilities = calculate_probabilities(data, indices);
+
+        if (indices.size() < min_samples_split) {
+            return new LeafNode(probabilities);
+        }
 
         if (indices.empty()) {
-            return new LeafNode(get_majority_class(data, indices));
+            return new LeafNode(probabilities);
         }
 
-        if (all_same_class(data, indices)) return new LeafNode(data[indices[0]].label);
+        if (all_same_class(data, indices)) return new LeafNode(probabilities);
 
         if (depth >= max_depth) {
-            return new LeafNode(get_majority_class(data, indices));
+            return new LeafNode(probabilities);
         }
 
-        auto [left_indices, right_indices] = split_data(data, indices, feature_index, threshold);
+        auto best_split = find_best_split(data, indices);
 
-        auto left_child = build_tree(data, left_indices, depth + 1);
-        auto right_child = build_tree(data, right_indices, depth + 1);
-        //TODO: Поиск лучшего разделения и рекурсия
+        if ((best_split.left_indices.size() < min_samples_leaf) || (best_split.right_indices.size() < min_samples_leaf)) {
+            return new LeafNode(probabilities);
+        }
 
+        if (best_split.information_gain <= 0.0) {
+            return new LeafNode(probabilities);
+        }
+
+
+        int feature_index = best_split.feature_index;
+        double threshold = best_split.threshold;
+
+        double weight = static_cast<double>(indices.size()) / total_samples;
+        feature_importances[feature_index] += weight * best_split.information_gain;
+
+        auto left_child = build_tree(data, best_split.left_indices, depth + 1, total_samples);
+        auto right_child = build_tree(data, best_split.right_indices, depth + 1, total_samples);
         return new InternalNode(feature_index, threshold, left_child, right_child); //заглушка
     }
 
+//=======================================================PUBLIC========================================================================//
 
 public:
-    DecisionTree() : root(nullptr), max_depth(32) {}
-    DecisionTree(int max_depth) : root(nullptr), max_depth(max_depth) {}
+    DecisionTree(int max_depth = 32,
+                 int min_samples_split = 2,
+                 int min_samples_leaf = 1,
+                 const std::string& string_criterion = "entropy")
+        : max_depth(max_depth),
+          min_samples_split(min_samples_split),
+          min_samples_leaf(min_samples_leaf) {
+
+        if (string_criterion == "entropy") {
+            criterion = SplitCriterion::ENTROPY;
+        } else {
+            criterion = SplitCriterion::GINI;
+        }
+    }
+
+    std::unordered_map<int, double> predict_proba(const std::vector<double>& features) const {
+        if (!root) return {};
+        return root->predict_proba(features);
+    }
+
+    const std::vector<double>& get_feature_importances() const {
+        return feature_importances;
+    }
 
     void fit(const std::vector<DataPoint>& data) {
         std::vector<int> indices(data.size());
@@ -227,7 +324,20 @@ public:
             indices[i] = i;
         }
 
-        root = build_tree(data, indices, 0);
+        feature_importances = std::vector<double>(data[0].features.size(), 0.0);
+
+        root = build_tree(data, indices, 0, data.size());
+
+        double summary_importance = 0.0;
+        for (const auto& importance : feature_importances) {
+            summary_importance += importance;
+        }
+
+        if (summary_importance > 0.0) {
+            for (size_t i = 0; i < feature_importances.size(); ++i) {
+                feature_importances[i] /= summary_importance;
+            }
+        }
     }
 
     int predict(const std::vector<double>& features) const {
@@ -251,8 +361,8 @@ std::vector<DataPoint> generate_test_data(int data_size) {
     std::vector<DataPoint> data;
     data.reserve(data_size);
 
-    std::uniform_real_distribution<double> feature_x1(0.0, 0.4);
-    std::uniform_real_distribution<double> feature_x2(0.6, 1.0);
+    std::uniform_real_distribution<double> feature_x1(0.0, 0.6);
+    std::uniform_real_distribution<double> feature_x2(0.4, 1.0);
     std::uniform_real_distribution<double> feature_y(0.0, 1.0);
     std::uniform_int_distribution<int> choice(1, 2);
 
