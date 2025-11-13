@@ -319,6 +319,12 @@ public:
     }
 
     void fit(const std::vector<DataPoint>& data) {
+        if (data.empty()) {
+            root = nullptr;
+            feature_importances.clear();
+            return;
+        }
+
         std::vector<int> indices(data.size());
         for (int i = 0; i < data.size(); ++i) {
             indices[i] = i;

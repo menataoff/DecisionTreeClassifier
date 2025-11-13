@@ -4,4 +4,5 @@ project(DecisionTree)
 set(CMAKE_CXX_STANDARD 20)
 
 add_executable(DecisionTree main.cpp
-        decision_tree.h)
+        decision_tree.h
+)
