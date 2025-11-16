@@ -18,6 +18,7 @@ struct DataPoint {
 
 class Node {
 public:
+    virtual int get_sample_count() const = 0;
     virtual ~Node() = default;
     virtual int predict(const std::vector<double>& features) const = 0;
     virtual std::unordered_map<int, double> predict_proba(const std::vector<double>& features) const = 0;
@@ -27,8 +28,10 @@ class LeafNode : public Node {
 private:
     std::unordered_map<int, double> class_probabilities;
     int majority_class;
+    int sample_count;
+
 public:
-    LeafNode(std::unordered_map<int, double> class_probabilities) : class_probabilities(class_probabilities) {
+    LeafNode(std::unordered_map<int, double> class_probabilities, int sample_count) : class_probabilities(class_probabilities), sample_count(sample_count) {
         majority_class = 0;
         double max_prob = 0.0;
         for (const auto& [class_label, prob] : class_probabilities) {
@@ -38,6 +41,8 @@ public:
             }
         }
     }
+
+    int get_sample_count() const override {return sample_count;}
 
     std::unordered_map<int, double> predict_proba(const std::vector<double>& features) const override{
         return class_probabilities;
@@ -54,9 +59,16 @@ private:
     double threshold;
     Node* left_child;
     Node* right_child;
+    int sample_count;
 public:
-    InternalNode(int feature_index, double threshold, Node* left_child, Node* right_child) :
-    feature_index(feature_index), threshold(threshold), left_child(left_child), right_child(right_child) {}
+    InternalNode(int feature_index, double threshold, Node* left_child, Node* right_child, int sample_count) :
+    feature_index(feature_index), threshold(threshold), left_child(left_child), right_child(right_child), sample_count(sample_count) {}
+
+    Node* get_left_child() const { return left_child; }
+    Node* get_right_child() const { return right_child; }
+
+    int get_sample_count() const override {return sample_count;}
+
     int predict(const std::vector<double>& features) const override {
         if (features[feature_index] <= threshold) {
             return left_child->predict(features);
@@ -153,7 +165,7 @@ private:
         std::unordered_map<int, int> class_counts;
 
 
-        std::unordered_map<int, double> labels_probabilities;
+        std::unordered_map<int, double> class_probabilities;
 
 
         for (int idx : indices) {
@@ -161,10 +173,10 @@ private:
         }
 
         for (const auto& [class_label, count] : class_counts) {
-            labels_probabilities[class_label] = (static_cast<double>(count)/total);
+            class_probabilities[class_label] = (static_cast<double>(count)/total);
         }
 
-        return labels_probabilities;
+        return class_probabilities;
     }
 
     static double calculate_gini(const std::vector<DataPoint>& data, const std::vector<int>& indices) {
@@ -249,6 +261,86 @@ private:
     }
 
 
+    double calculate_node_accuracy(Node* node, const std::vector<DataPoint>& data, const std::vector<int>& indices) {
+        if (node == nullptr or indices.empty()) {
+            return 0.0;
+        }
+
+        int total_samples = indices.size();
+        int correct_predictions = 0;
+
+        for (int idx : indices) {
+            if (node->predict(data[idx].features) == data[idx].label) {
+                correct_predictions++;
+            }
+        }
+
+        return static_cast<double>(correct_predictions)/total_samples;
+    }
+
+    double calculate_node_error(Node* node, const std::vector<DataPoint>& data, const std::vector<int>& indices) {
+        return (1 - calculate_node_accuracy(node, data, indices));
+    }
+
+    int count_subtree_leaves(Node* node) {
+        if (node == nullptr) {
+            return 0;
+        }
+        if (dynamic_cast<LeafNode*>(node) != nullptr) {
+            return 1;
+        }
+
+        auto internal_node = dynamic_cast<InternalNode*>(node);
+
+        if (internal_node != nullptr) {
+            return count_subtree_leaves(internal_node->get_left_child()) + count_subtree_leaves(internal_node->get_right_child());
+        }
+        return 0;
+    }
+
+    double calculate_subtree_error(Node* node, const std::vector<DataPoint>& validation_data, const std::vector<int>& validation_indices, int total_training_samples) {
+        if (node == nullptr or total_training_samples == 0) {
+            return 0.0;
+        }
+
+        if (dynamic_cast<LeafNode*>(node) != nullptr) {
+            auto leaf_node = dynamic_cast<LeafNode*>(node);
+            double error_rate = calculate_node_error(leaf_node, validation_data, validation_indices);
+            double weight = static_cast<double>(leaf_node->get_sample_count()) / total_training_samples;
+            return weight*error_rate;
+        }
+
+        if (dynamic_cast<InternalNode*>(node) != nullptr) {
+            auto internal_node = dynamic_cast<InternalNode*>(node);
+            double weighted_left_error_rate = calculate_subtree_error(internal_node->get_left_child(), validation_data, validation_indices, total_training_samples);
+            double weighted_right_error_rate = calculate_subtree_error(internal_node->get_right_child(), validation_data, validation_indices, total_training_samples);
+            return weighted_left_error_rate + weighted_right_error_rate;
+        }
+
+        return 0.0;
+    }
+
+    double calculate_prune_metric(Node* node, const std::vector<DataPoint>& validation_data, const std::vector<int>& validation_indices, int total_training_samples) {
+        return 0.0;
+    }
+
+    // std::unordered_map<int, double> collect_subtree_stats(Node* node) {
+    //     if (dynamic_cast<LeafNode*>(node) != nullptr) {
+    //         auto leaf_node = dynamic_cast<LeafNode*>(node);
+    //         return leaf_node->predict_proba({});
+    //     }
+    //
+    //     if (dynamic_cast<InternalNode*>(node) != nullptr) {
+    //         auto internal_node = dynamic_cast<InternalNode*>(node);
+    //         auto left_stats = collect_subtree_stats(internal_node->get_left_child());
+    //         auto right_stats = collect_subtree_stats(internal_node->get_right_child());
+    //     }
+    //
+    //     return {};
+    //
+    // }
+
+
     Node* build_tree(const std::vector<DataPoint>& data,
         const std::vector<int>& indices,
         int depth, int total_samples) {
@@ -256,27 +348,27 @@ private:
         auto probabilities = calculate_probabilities(data, indices);
 
         if (indices.size() < min_samples_split) {
-            return new LeafNode(probabilities);
+            return new LeafNode(probabilities, indices.size());
         }
 
         if (indices.empty()) {
-            return new LeafNode(probabilities);
+            return new LeafNode(probabilities, indices.size());
         }
 
-        if (all_same_class(data, indices)) return new LeafNode(probabilities);
+        if (all_same_class(data, indices)) return new LeafNode(probabilities, indices.size());
 
         if (depth >= max_depth) {
-            return new LeafNode(probabilities);
+            return new LeafNode(probabilities, indices.size());
         }
 
         auto best_split = find_best_split(data, indices);
 
         if ((best_split.left_indices.size() < min_samples_leaf) || (best_split.right_indices.size() < min_samples_leaf)) {
-            return new LeafNode(probabilities);
+            return new LeafNode(probabilities, indices.size());
         }
 
         if (best_split.information_gain <= 0.0) {
-            return new LeafNode(probabilities);
+            return new LeafNode(probabilities, indices.size());
         }
 
 
@@ -288,7 +380,7 @@ private:
 
         auto left_child = build_tree(data, best_split.left_indices, depth + 1, total_samples);
         auto right_child = build_tree(data, best_split.right_indices, depth + 1, total_samples);
-        return new InternalNode(feature_index, threshold, left_child, right_child); //заглушка
+        return new InternalNode(feature_index, threshold, left_child, right_child, indices.size()); //заглушка
     }
 
 //=======================================================PUBLIC========================================================================//
