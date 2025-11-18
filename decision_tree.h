@@ -161,6 +161,8 @@ private:
     }
 
     static std::unordered_map<int, double> calculate_probabilities(const std::vector<DataPoint>& data, const std::vector<int>& indices) {
+        if (indices.empty()) return {};
+
         int total = indices.size();
         std::unordered_map<int, int> class_counts;
 
@@ -321,25 +323,54 @@ private:
     }
 
     double calculate_prune_metric(Node* node, const std::vector<DataPoint>& validation_data, const std::vector<int>& validation_indices, int total_training_samples) {
-        return 0.0;
+        if (dynamic_cast<LeafNode*>(node) != nullptr) {
+            return std::numeric_limits<double>::infinity();
+        }
+
+        int T_t = count_subtree_leaves(node);
+        double weighted_subtree_error = calculate_subtree_error(node, validation_data, validation_indices, total_training_samples);
+
+        int sample_count_if_leaf = node->get_sample_count();
+        double error_if_leaf = calculate_node_error(node, validation_data, validation_indices);
+        double weighted_leaf_error = (static_cast<double>(sample_count_if_leaf) / total_training_samples) * error_if_leaf;
+
+        return (weighted_leaf_error - weighted_subtree_error) / (T_t - 1);
     }
 
-    // std::unordered_map<int, double> collect_subtree_stats(Node* node) {
-    //     if (dynamic_cast<LeafNode*>(node) != nullptr) {
-    //         auto leaf_node = dynamic_cast<LeafNode*>(node);
-    //         return leaf_node->predict_proba({});
-    //     }
-    //
-    //     if (dynamic_cast<InternalNode*>(node) != nullptr) {
-    //         auto internal_node = dynamic_cast<InternalNode*>(node);
-    //         auto left_stats = collect_subtree_stats(internal_node->get_left_child());
-    //         auto right_stats = collect_subtree_stats(internal_node->get_right_child());
-    //     }
-    //
-    //     return {};
+    void find_best_weakest_links(Node* node, Node*& best_candidate, double& min_g_value,
+        const std::vector<DataPoint>& validation_data, const std::vector<int>& validation_indices, int total_training_samples) {
+
+        if (node == nullptr) return;
+
+        if (dynamic_cast<InternalNode*>(node) != nullptr) {
+            InternalNode* internal_node = dynamic_cast<InternalNode*>(node) ;
+
+            find_best_weakest_links(internal_node->get_left_child(), best_candidate, min_g_value, validation_data, validation_indices, total_training_samples);
+            find_best_weakest_links(internal_node->get_right_child(), best_candidate, min_g_value, validation_data, validation_indices, total_training_samples);
+
+            double g_value = calculate_prune_metric(internal_node, validation_data, validation_indices, total_training_samples);
+
+            if (g_value < min_g_value) {
+                best_candidate = internal_node;
+                min_g_value = g_value;
+            }
+        }
+    }
+
+    Node* find_weakest_links(Node* node, const std::vector<DataPoint>& validation_data,
+        const std::vector<int>& validation_indices, int total_training_samples) {
+        Node* best_candidate = nullptr;
+        double min_g_value = std::numeric_limits<double>::infinity();
+        find_best_weakest_links(node, best_candidate, min_g_value, validation_data, validation_indices, total_training_samples);
+        return best_candidate;
+    }
+
+    // std::vector<std::pair<DecisionTree*, double>> cost_complexity_prune(const std::vector<DataPoint>& validation_data,
+    //     const std::vector<int>& validation_indices, int total_training_samples) {
+    //     std::vector<std::pair<DecisionTree*, double>> trees;
+    //     auto current_tree = this*;
     //
     // }
-
 
     Node* build_tree(const std::vector<DataPoint>& data,
         const std::vector<int>& indices,
