@@ -101,6 +101,9 @@ private:
     int min_samples_leaf = 1;
     std::vector<double> feature_importances;
     SplitCriterion criterion = SplitCriterion::ENTROPY;
+    double ccp_alpha = 0.0;
+    bool auto_prune = false;
+    double validation_ratio = 0.1;
 
 
     struct SplitInfo {
@@ -372,6 +375,10 @@ private:
     //
     // }
 
+    void cost_complexity_prune(double alpha, const std::vector<DataPoint>& data, const std::vector<int>& indices, int total_training_samples) {
+        if (root == nullptr || alpha < 0 || data.empty() || indices.empty()) return;
+    }
+
     Node* build_tree(const std::vector<DataPoint>& data,
         const std::vector<int>& indices,
         int depth, int total_samples) {
@@ -420,10 +427,15 @@ public:
     DecisionTree(int max_depth = 32,
                  int min_samples_split = 2,
                  int min_samples_leaf = 1,
-                 const std::string& string_criterion = "entropy")
+                 const std::string& string_criterion = "entropy",
+                 double ccp_alpha = 0.0,
+                 bool auto_prune = false,
+                 double validation_ratio = 0.1)
         : max_depth(max_depth),
           min_samples_split(min_samples_split),
-          min_samples_leaf(min_samples_leaf) {
+          min_samples_leaf(min_samples_leaf),
+          ccp_alpha(ccp_alpha), auto_prune(auto_prune), validation_ratio(validation_ratio)
+        {
 
         if (string_criterion == "entropy") {
             criterion = SplitCriterion::ENTROPY;
@@ -467,6 +479,21 @@ public:
                 feature_importances[i] /= summary_importance;
             }
         }
+    }
+
+    void fit(const std::vector<std::vector<double>>& X, const std::vector<int>& y) {
+        if (X.size() != y.size() || X.empty()) {
+            throw std::invalid_argument("Invalid train data.\n");
+        }
+
+        std::vector<DataPoint> data;
+        data.reserve(X.size());
+
+        for (size_t i = 0; i < X.size(); ++i) {
+            data.emplace_back(X[i], y[i]);
+        }
+
+        fit(data);
     }
 
     int predict(const std::vector<double>& features) const {
