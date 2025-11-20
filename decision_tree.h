@@ -44,6 +44,7 @@ public:
         }
     }
 
+
     int get_sample_count() const override {return sample_count;}
 
     std::unordered_map<int, double> get_class_probabilities() const {
@@ -346,7 +347,7 @@ private:
         double error_if_leaf = calculate_node_error(node, error_data, error_indices);
         double weighted_leaf_error = (static_cast<double>(sample_count_if_leaf) / total_training_samples) * error_if_leaf;
 
-        return (weighted_leaf_error - weighted_subtree_error) / (T_t - 1);
+        return (weighted_subtree_error - weighted_leaf_error) / (T_t - 1);
     }
 
     void find_best_weakest_links(Node* node, Node*& best_candidate, double& min_g_value,
@@ -419,7 +420,7 @@ private:
                 InternalNode* internal_node = dynamic_cast<InternalNode*>(current.node);
                 double g_value = calculate_prune_metric(internal_node, data, indices, total_training_samples);
 
-                if (g_value <= alpha) {
+                if (g_value >= 0 && g_value <= alpha) {
                     prune_node_to_leaf(internal_node, current.parent, current.is_left_child, data, indices);
                 } else {
                     nodes_queue.push(NodeWithParent(internal_node->get_left_child(), internal_node, true));
@@ -590,45 +591,52 @@ private:
     Node* build_tree(const std::vector<DataPoint>& data,
         const std::vector<int>& indices,
         int depth, int total_samples) {
-
         auto probabilities = calculate_probabilities(data, indices);
 
         if (indices.size() < min_samples_split) {
-            return new LeafNode(probabilities, indices.size());
+            auto leaf_probabilities = calculate_probabilities(data, indices);
+            return new LeafNode(leaf_probabilities, indices.size());
         }
 
         if (indices.empty()) {
-            return new LeafNode(probabilities, indices.size());
+            auto leaf_probabilities = calculate_probabilities(data, indices);
+            return new LeafNode(leaf_probabilities, indices.size());
         }
 
-        if (all_same_class(data, indices)) return new LeafNode(probabilities, indices.size());
+        if (all_same_class(data, indices)) {
+            auto leaf_probabilities = calculate_probabilities(data, indices);
+            return new LeafNode(leaf_probabilities, indices.size());
+        }
 
         if (depth >= max_depth) {
-            return new LeafNode(probabilities, indices.size());
+            auto leaf_probabilities = calculate_probabilities(data, indices);
+            return new LeafNode(leaf_probabilities, indices.size());
         }
 
         auto best_split = find_best_split(data, indices);
 
         if ((best_split.left_indices.size() < min_samples_leaf) || (best_split.right_indices.size() < min_samples_leaf)) {
-            return new LeafNode(probabilities, indices.size());
+            auto leaf_probabilities = calculate_probabilities(data, indices);
+            return new LeafNode(leaf_probabilities, indices.size());
         }
 
         if (best_split.information_gain < 0.0) {
-            return new LeafNode(probabilities, indices.size());
+            auto leaf_probabilities = calculate_probabilities(data, indices);
+            return new LeafNode(leaf_probabilities, indices.size());
         }
-
 
         int feature_index = best_split.feature_index;
         double threshold = best_split.threshold;
 
-        double weight = static_cast<double>(indices.size()) / total_samples;
-        if (feature_importances.empty() && !data.empty()) {
+        if  (!feature_importances.empty()) {
+            double weight = static_cast<double>(indices.size()) / total_samples;
+            double old_value = feature_importances[feature_index];
             feature_importances[feature_index] += weight * best_split.information_gain;
         }
 
         auto left_child = build_tree(data, best_split.left_indices, depth + 1, total_samples);
         auto right_child = build_tree(data, best_split.right_indices, depth + 1, total_samples);
-        return new InternalNode(feature_index, threshold, left_child, right_child, indices.size()); //заглушка
+        return new InternalNode(feature_index, threshold, left_child, right_child, indices.size());
     }
 
 //=======================================================PUBLIC========================================================================//
@@ -664,6 +672,8 @@ public:
         }
     }
 
+    Node* get_root() const { return root; }
+
     std::unordered_map<int, double> predict_proba(const std::vector<double>& features) const {
         if (!root) return {};
         return root->predict_proba(features);
@@ -694,7 +704,6 @@ public:
         }
 
         feature_importances = std::vector<double>(data[0].features.size(), 0.0);
-
         root = build_tree(data, indices, 0, data.size());
 
         double summary_importance = 0.0;
@@ -755,8 +764,8 @@ std::vector<DataPoint> generate_test_data(int data_size) {
     std::vector<DataPoint> data;
     data.reserve(data_size);
 
-    std::uniform_real_distribution<double> feature_x1(0.0, 0.6);
-    std::uniform_real_distribution<double> feature_x2(0.4, 1.0);
+    std::uniform_real_distribution<double> feature_x1(0.0, 0.5);
+    std::uniform_real_distribution<double> feature_x2(0.5, 1.0);
     std::uniform_real_distribution<double> feature_y(0.0, 1.0);
     std::uniform_int_distribution<int> choice(1, 2);
 
