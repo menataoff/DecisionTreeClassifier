@@ -45,6 +45,10 @@ public:
 
     int get_sample_count() const override {return sample_count;}
 
+    std::unordered_map<int, double> get_class_probabilities() const {
+        return class_probabilities;
+    }
+
     std::unordered_map<int, double> predict_proba(const std::vector<double>& features) const override{
         return class_probabilities;
     }
@@ -69,6 +73,8 @@ public:
     Node* get_left_child() const { return left_child; }
     Node* get_right_child() const { return right_child; }
 
+    int get_feature_index() const {return feature_index;}
+    double get_threshold() const {return threshold;}
     int get_sample_count() const override {return sample_count;}
 
     int predict(const std::vector<double>& features) const override {
@@ -210,7 +216,7 @@ private:
 
     static double calculate_gini_gain(const std::vector<DataPoint>& data, const std::vector<int>& parent_indices,
                 const std::vector<int>& left_indices, const std::vector<int>& right_indices) {
-        double gini_gain = 0.0;
+        if (parent_indices.size() == 0) return 0.0;
         double parent_gini = calculate_gini(data, parent_indices);
         double left_gini= calculate_gini(data, left_indices);
         double right_gini = calculate_gini(data, right_indices);
@@ -219,7 +225,7 @@ private:
 
     static double calculate_information_gain(const std::vector<DataPoint>& data, const std::vector<int>& parent_indices,
                 const std::vector<int>& left_indices, const std::vector<int>& right_indices) {
-        double info_gain = 0.0;
+        if (parent_indices.size() == 0) return 0.0;
         double parent_entropy = calculate_entropy(data, parent_indices);
         double left_entropy = calculate_entropy(data, left_indices);
         double right_entropy = calculate_entropy(data, right_indices);
@@ -422,6 +428,162 @@ private:
         }
     }
 
+    void manual_pruning(const std::vector<DataPoint>& data, double alpha) {
+        std::vector<int> all_indices(data.size());
+        for (int i = 0; i < data.size(); ++i) {
+            all_indices[i] = i;
+        }
+
+        cost_complexity_prune(alpha, data, all_indices, all_indices.size());
+    }
+
+    std::pair<std::vector<int>, std::vector<int>> split_data_indices(int total_samples, double validation_size) {
+
+        std::vector<int> all_indices(total_samples);
+        for (int i = 0; i < total_samples; ++i) {
+            all_indices[i] = i;
+        }
+
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::shuffle(all_indices.begin(), all_indices.end(), gen);
+
+        int idx_to_split = static_cast<int>(validation_size * total_samples);
+
+        if (idx_to_split <= 0) idx_to_split = 1;
+        if (idx_to_split >= total_samples) idx_to_split = total_samples - 1;
+
+        auto validation_iter_begin = all_indices.begin();
+        auto validation_iter_end = all_indices.begin() + idx_to_split;
+        auto train_iter_begin = all_indices.begin() + idx_to_split;
+        auto train_iter_end = all_indices.end();
+
+        std::vector<int> train_indices(train_iter_begin, train_iter_end);
+        std::vector<int> validation_indices(validation_iter_begin, validation_iter_end);
+        return std::pair{train_indices, validation_indices};
+    }
+
+    Node* recursive_copy_node(Node* original) const {
+        if (original == nullptr) return nullptr;
+
+        if (dynamic_cast<LeafNode*>(original) != nullptr) {
+            LeafNode* original_leaf_node = dynamic_cast<LeafNode*>(original);
+            LeafNode* copy_leaf_node = new LeafNode(original_leaf_node->get_class_probabilities(), original_leaf_node->get_sample_count());
+            return copy_leaf_node;
+        }
+
+        if (dynamic_cast<InternalNode*>(original) != nullptr) {
+            InternalNode* original_internal_node = dynamic_cast<InternalNode*>(original);
+            Node* copy_left_child = recursive_copy_node(original_internal_node->get_left_child());
+            Node* copy_right_child = recursive_copy_node(original_internal_node->get_right_child());
+            InternalNode* copy_internal_node = new InternalNode(original_internal_node->get_feature_index(), original_internal_node->get_threshold(),
+                copy_left_child, copy_right_child, original_internal_node->get_sample_count());
+            return copy_internal_node;
+        }
+
+        return nullptr;
+    }
+
+    DecisionTree* create_copy() const {
+        DecisionTree* copy_tree = new DecisionTree(
+            max_depth,
+            min_samples_split,
+            min_samples_leaf,
+            get_criterion(),
+            ccp_alpha,
+            auto_prune,
+            validation_size
+        );
+
+        copy_tree->root = recursive_copy_node(root);
+
+        copy_tree->feature_importances = this->feature_importances;
+
+        return copy_tree;
+    }
+
+    struct PrunedTree {
+        double alpha;
+        DecisionTree* tree;
+
+        PrunedTree(double alpha, DecisionTree* tree) : alpha(alpha), tree(tree) {}
+    };
+
+    std::vector<PrunedTree> build_pruning_sequence(const std::vector<DataPoint>& data,
+                                              const std::vector<int>& train_indices) {
+        std::vector<PrunedTree> sequence;
+
+        DecisionTree* current_tree = create_copy();
+        sequence.push_back(PrunedTree(0.0, current_tree));
+
+        int max_iterations = 1024;
+        int iteration = 0;
+        int total_training_samples = train_indices.size();
+
+        while (iteration < max_iterations) {
+            Node* weakest_link = find_weakest_links(current_tree->root, data, train_indices, total_training_samples);
+            if (weakest_link == nullptr) break;
+
+            double alpha = calculate_prune_metric(weakest_link, data, train_indices, total_training_samples);
+            DecisionTree* pruned_tree = current_tree->create_copy();
+            pruned_tree->cost_complexity_prune(alpha, data, train_indices, total_training_samples);
+            if (alpha == sequence.back().alpha) {
+                delete pruned_tree;
+                break;
+            }
+            sequence.push_back(PrunedTree(alpha, pruned_tree));
+            current_tree = pruned_tree;
+            ++iteration;
+        }
+
+        return sequence;
+    }
+
+    DecisionTree* select_best_tree(const std::vector<PrunedTree>& sequence,
+        const std::vector<DataPoint>& data,
+        const std::vector<int>& validation_indices) {
+        if (sequence.empty()) return nullptr;
+        if (validation_indices.size() == 0) return nullptr;
+        DecisionTree* best_tree = sequence[0].tree;
+        double min_error = calculate_node_error(best_tree->root, data, validation_indices);
+
+        for (size_t i = 1; i < sequence.size(); ++i) {
+            double current_error = calculate_node_error(sequence[i].tree->root, data, validation_indices);
+            if (current_error < min_error) {
+                min_error = current_error;
+                best_tree = sequence[i].tree;
+            }
+        }
+
+        return best_tree->create_copy();
+    }
+
+    void automatic_pruning(const std::vector<DataPoint>& data) {
+        auto [train_indices, validation_indices] = split_data_indices(data.size(), validation_size);
+
+        auto sequence = build_pruning_sequence(data, train_indices);
+
+        auto best_tree = select_best_tree(sequence, data, validation_indices);
+
+        if (best_tree != nullptr) {
+            delete this->root;
+            this->root = best_tree->root;
+            best_tree->root = nullptr;
+        }
+        else {
+            for (auto& pruned_tree : sequence) {
+                delete pruned_tree.tree;
+            }
+            return;
+        }
+
+        for (auto& pruned_tree : sequence) {
+            delete pruned_tree.tree;
+        }
+
+        delete best_tree;
+    }
+
     Node* build_tree(const std::vector<DataPoint>& data,
         const std::vector<int>& indices,
         int depth, int total_samples) {
@@ -506,6 +668,14 @@ public:
         return feature_importances;
     }
 
+    std::string get_criterion() const {
+        if (criterion == SplitCriterion::ENTROPY) {
+            return "entropy";
+        } else {
+            return "gini";
+        }
+    }
+
     void fit(const std::vector<DataPoint>& data) {
         if (data.empty()) {
             root = nullptr;
@@ -532,6 +702,12 @@ public:
                 feature_importances[i] /= summary_importance;
             }
         }
+
+        if (auto_prune) {
+            automatic_pruning(data);
+        } else if (ccp_alpha > 0.0) {
+            manual_pruning(data, ccp_alpha);
+        }
     }
 
     void fit(const std::vector<std::vector<double>>& X, const std::vector<int>& y) {
@@ -547,6 +723,10 @@ public:
         }
 
         fit(data);
+    }
+
+    void set_ccp_alpha(double new_alpha) {
+        ccp_alpha = new_alpha;
     }
 
     int predict(const std::vector<double>& features) const {
