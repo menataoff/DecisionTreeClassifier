@@ -2,13 +2,14 @@
 // Created by myk1n on 12.11.2025.
 //
 
-#include<vector>
+#include <vector>
 #include <memory>
 #include <ranges>
 #include <unordered_map>
 #include <cmath>
 #include <algorithm>
 #include <queue>
+#include <random>
 
 struct DataPoint {
     std::vector<double> features;
@@ -172,7 +173,7 @@ private:
     }
 
     static std::unordered_map<int, double> calculate_probabilities(const std::vector<DataPoint>& data, const std::vector<int>& indices) {
-        if (indices.empty()) return {};
+        if (indices.empty()) return {{-1, 1.0}};
 
         int total = indices.size();
         std::unordered_map<int, int> class_counts;
@@ -527,10 +528,12 @@ private:
             double alpha = calculate_prune_metric(weakest_link, data, train_indices, total_training_samples);
             DecisionTree* pruned_tree = current_tree->create_copy();
             pruned_tree->cost_complexity_prune(alpha, data, train_indices, total_training_samples);
-            if (alpha == sequence.back().alpha) {
+
+            if (count_subtree_leaves(pruned_tree->root) == count_subtree_leaves(current_tree->root)) {
                 delete pruned_tree;
                 break;
             }
+
             sequence.push_back(PrunedTree(alpha, pruned_tree));
             current_tree = pruned_tree;
             ++iteration;
@@ -610,7 +613,7 @@ private:
             return new LeafNode(probabilities, indices.size());
         }
 
-        if (best_split.information_gain <= 0.0) {
+        if (best_split.information_gain < 0.0) {
             return new LeafNode(probabilities, indices.size());
         }
 
@@ -619,7 +622,9 @@ private:
         double threshold = best_split.threshold;
 
         double weight = static_cast<double>(indices.size()) / total_samples;
-        feature_importances[feature_index] += weight * best_split.information_gain;
+        if (feature_importances.empty() && !data.empty()) {
+            feature_importances[feature_index] += weight * best_split.information_gain;
+        }
 
         auto left_child = build_tree(data, best_split.left_indices, depth + 1, total_samples);
         auto right_child = build_tree(data, best_split.right_indices, depth + 1, total_samples);
