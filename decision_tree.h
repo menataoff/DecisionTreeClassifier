@@ -5,7 +5,7 @@
 #include <cmath>
 #include <algorithm>
 #include <random>
-
+#include <iostream>
 struct DataPoint {
     std::vector<double> features;
     int label;
@@ -14,22 +14,27 @@ struct DataPoint {
 };
 
 class Node {
+protected:
+    double node_error;
+    int sample_count;
+    int majority_class;
+    std::unordered_map<int, double> class_probabilities;
 public:
-    virtual int get_sample_count() const = 0;
+    Node(double node_error, int sample_count, int majority_class, const std::unordered_map<int, double>& class_probabilities) :
+    node_error(node_error), sample_count(sample_count), majority_class(majority_class), class_probabilities(class_probabilities) {}
+    double get_node_error() const { return node_error; }        // ← с реализацией
+    int get_sample_count() const { return sample_count; }       // ← с реализацией
+    int get_majority_class() const { return majority_class; }
+    const std::unordered_map<int, double>& get_class_probabilities() const { return class_probabilities; }
     virtual ~Node() = default;
     virtual int predict(const std::vector<double>& features) const = 0;
     virtual std::unordered_map<int, double> predict_proba(const std::vector<double>& features) const = 0;
 };
 
 class LeafNode : public Node {
-private:
-    std::unordered_map<int, double> class_probabilities;
-    int majority_class;
-    int sample_count;
-
 public:
-    LeafNode(std::unordered_map<int, double> class_probabilities, int sample_count) : class_probabilities(class_probabilities), sample_count(sample_count) {
-        majority_class = 0;
+    LeafNode(const std::unordered_map<int, double>& class_probabilities, int sample_count, double node_error) :
+    Node(node_error, sample_count, 0, class_probabilities) {
         double max_prob = 0.0;
         for (const auto& [class_label, prob] : class_probabilities) {
             if (prob > max_prob) {
@@ -37,13 +42,6 @@ public:
                 max_prob = prob;
             }
         }
-    }
-
-
-    int get_sample_count() const override {return sample_count;}
-
-    std::unordered_map<int, double> get_class_probabilities() const {
-        return class_probabilities;
     }
 
     std::unordered_map<int, double> predict_proba(const std::vector<double>& features) const override{
@@ -59,20 +57,20 @@ class InternalNode : public Node {
 private:
     int feature_index;
     double threshold;
-    int sample_count;
 public:
     Node* left_child;
     Node* right_child;
 
-    InternalNode(int feature_index, double threshold, Node* left_child, Node* right_child, int sample_count) :
-    feature_index(feature_index), threshold(threshold), left_child(left_child), right_child(right_child), sample_count(sample_count) {}
+    InternalNode(int feature_index, double threshold, Node* left_child, Node* right_child,
+        int majority_class, const std::unordered_map<int, double>& class_probabilities, int sample_count, double node_error) :
+    Node(node_error, sample_count, majority_class, class_probabilities), feature_index(feature_index),
+    threshold(threshold), left_child(left_child), right_child(right_child) {}
 
     Node* get_left_child() const { return left_child; }
     Node* get_right_child() const { return right_child; }
 
     int get_feature_index() const {return feature_index;}
     double get_threshold() const {return threshold;}
-    int get_sample_count() const override {return sample_count;}
 
     int predict(const std::vector<double>& features) const override {
         if (features[feature_index] <= threshold) {
@@ -107,8 +105,6 @@ private:
     std::vector<double> feature_importances;
     SplitCriterion criterion = SplitCriterion::ENTROPY;
     double ccp_alpha = 0.0;
-    // bool auto_prune = true;
-    // double validation_size = 0.15;
 
 
     struct SplitInfo {
@@ -174,9 +170,7 @@ private:
         int total = indices.size();
         std::unordered_map<int, int> class_counts;
 
-
         std::unordered_map<int, double> class_probabilities;
-
 
         for (int idx : indices) {
             class_counts[data[idx].label]++;
@@ -249,7 +243,7 @@ private:
         return true;
     }
 
-    int get_majority_class(const std::vector<DataPoint>& data, const std::vector<int>& indices) {
+    int get_majority_class_in_node(const std::vector<DataPoint>& data, const std::vector<int>& indices) {
         if (indices.empty()) return 0;
 
         std::unordered_map<int, int> class_counts;
@@ -270,136 +264,135 @@ private:
         return majority_class;
     }
 
+    // double calculate_node_accuracy(const Node* node, const std::vector<DataPoint>& data, const std::vector<int>& indices) {
+    //     if (node == nullptr or indices.empty()) {
+    //         return 0.0;
+    //     }
+    //     int total_samples = indices.size();
+    //     int correct_predictions = 0;
+    //     for (int idx : indices) {
+    //         if (node->predict(data[idx].features) == data[idx].label) {
+    //             correct_predictions++;
+    //         }
+    //     }
+    //     return static_cast<double>(correct_predictions)/total_samples;
+    // }
 
-    double calculate_node_accuracy(const Node* node, const std::vector<DataPoint>& data, const std::vector<int>& indices) {
-        if (node == nullptr or indices.empty()) {
+    double calculate_node_error(const Node* node, const std::vector<DataPoint>& data,
+                          const std::vector<int>& indices, int total_training_samples) {
+        if (node == nullptr || indices.empty() || total_training_samples == 0) {
             return 0.0;
         }
 
-        int total_samples = indices.size();
-        int correct_predictions = 0;
-
-        for (int idx : indices) {
-            if (node->predict(data[idx].features) == data[idx].label) {
-                correct_predictions++;
-            }
+        double impurity = 0.0;
+        if (criterion == SplitCriterion::ENTROPY) {
+            impurity = calculate_entropy(data, indices);
+        } else {
+            impurity = calculate_gini(data, indices);
         }
 
-        return static_cast<double>(correct_predictions)/total_samples;
+        double weight = static_cast<double>(indices.size()) / total_training_samples;
+
+        return weight * impurity;
     }
-
-    double calculate_node_error(const Node* node, const std::vector<DataPoint>& data, const std::vector<int>& indices) {
-        return (1 - calculate_node_accuracy(node, data, indices));
-    }
-
-
 
     std::vector<int> get_indices_for_node(Node* node, const std::vector<DataPoint>& data,
                                     const std::vector<int>& parent_indices) {
-        if (dynamic_cast<LeafNode*>(node) != nullptr) {
-            return parent_indices;
+        if (node == nullptr) {
+            return {};
         }
-
-        if (dynamic_cast<InternalNode*>(node) != nullptr) {
-            std::vector<int> result_indices;
-            InternalNode* internal_node = dynamic_cast<InternalNode*>(node);
-            int feature_idx = internal_node->get_feature_index();
-            double threshold = internal_node->get_threshold();
-            for (int idx : parent_indices) {
-                if (data[idx].features[feature_idx] <= threshold) {
-                    result_indices.push_back(idx);
-                }
-            }
-            return result_indices;
-        }
-        return {};
+        return parent_indices;
     }
 
-    double calculate_subtree_error(Node* node, const std::vector<DataPoint>& error_data,
-                             const std::vector<int>& error_indices, int total_training_samples) {
-        if (node == nullptr) return 0.0;
-
-        std::vector<int> node_indices = get_indices_for_node(node, error_data, error_indices);
-
+    std::pair<double, int> calculate_tree_error(Node* node) {
         if (dynamic_cast<LeafNode*>(node) != nullptr) {
-            double error = calculate_node_error(node, error_data, node_indices);
-            double weight = static_cast<double>(node_indices.size()) / total_training_samples;
-
-            return weight * error;
+            return {node->get_node_error(), 1};
         }
 
         if (dynamic_cast<InternalNode*>(node) != nullptr) {
             InternalNode* internal_node = dynamic_cast<InternalNode*>(node);
-            std::vector<int> left_indices;
-            std::vector<int> right_indices;
-            int feature_idx = internal_node->get_feature_index();
-            double threshold = internal_node->get_threshold();
 
-            for (int idx : node_indices) {
-                if (error_data[idx].features[feature_idx] <= threshold) {
-                    left_indices.push_back(idx);
-                } else {
-                    right_indices.push_back(idx);
-                }
-            }
-            double left_error = calculate_subtree_error(internal_node->left_child, error_data, left_indices, total_training_samples);
-            double right_error = calculate_subtree_error(internal_node->right_child, error_data, right_indices, total_training_samples);
-            double total_error = left_error + right_error;
+            auto left_error = calculate_tree_error(internal_node->left_child);
+            auto right_error = calculate_tree_error(internal_node->right_child);
 
-            return total_error;
+            return {left_error.first + right_error.first, left_error.second + right_error.second};
         }
-
-        return 0.0;
+        return {0.0, 0};
     }
 
-    void find_best_weakest_links(Node* node, Node*& best_candidate, double& min_g_value,
-        const std::vector<DataPoint>& error_data, const std::vector<int>& error_indices, int total_training_samples) {
-
-        if (node == nullptr) return;
+    std::pair<Node*, double> find_global_weakest_link(
+    Node* node,
+    Node* current_best_node = nullptr,
+    double current_min_alpha = std::numeric_limits<double>::infinity()) {
+        if (node == nullptr || dynamic_cast<LeafNode*>(node) != nullptr) {
+            return {current_best_node, current_min_alpha};
+        }
 
         if (dynamic_cast<InternalNode*>(node) != nullptr) {
-            std::vector<int> node_indices = get_indices_for_node(node, error_data, error_indices);
-            InternalNode* internal_node = dynamic_cast<InternalNode*>(node) ;
+            InternalNode* internal_node = dynamic_cast<InternalNode*>(node);
 
-            find_best_weakest_links(internal_node->get_left_child(), best_candidate, min_g_value, error_data, node_indices, total_training_samples);
-            find_best_weakest_links(internal_node->get_right_child(), best_candidate, min_g_value, error_data, node_indices, total_training_samples);
+            double R_t = node->get_node_error();
+            auto [R_Tt, T_t] = calculate_tree_error(node);
 
-            double g_value = calculate_prune_metric(internal_node, error_data, node_indices, total_training_samples);
+            if (T_t <= 1) {
+            } else {
+                double alpha = (R_t - R_Tt) / (T_t - 1);
 
-            if (g_value < min_g_value && g_value > 0 && g_value != std::numeric_limits<double>::infinity()) {
-                best_candidate = internal_node;
-                min_g_value = g_value;
+                if (alpha >= 0 && alpha < current_min_alpha) {
+                    current_min_alpha = alpha;
+                    current_best_node = node;
+                }
+            }
+
+            auto [left_candidate, left_alpha] = find_global_weakest_link(
+                internal_node->get_left_child(), current_best_node, current_min_alpha);
+
+            auto [right_candidate, right_alpha] = find_global_weakest_link(
+                internal_node->get_right_child(), current_best_node, current_min_alpha);
+
+            if (left_alpha < current_min_alpha && left_alpha <= right_alpha) {
+                return {left_candidate, left_alpha};
+            } else if (right_alpha < current_min_alpha && right_alpha <= left_alpha) {
+                return {right_candidate, right_alpha};
+            } else {
+                return {current_best_node, current_min_alpha};
             }
         }
+
+        return {current_best_node, current_min_alpha};
     }
 
-    Node* find_weakest_links(Node* node, const std::vector<DataPoint>& error_data,
-        const std::vector<int>& error_indices, int total_training_samples) {
-        Node* best_candidate = nullptr;
-        double min_g_value = std::numeric_limits<double>::infinity();
-        find_best_weakest_links(node, best_candidate, min_g_value, error_data, error_indices, total_training_samples);
-        return best_candidate;
+    bool is_leaf_node(Node* node) {
+        return (dynamic_cast<LeafNode*>(node) != nullptr);
     }
 
-    struct NodeWithParent {
-        Node* node;
-        Node* parent;
-        bool is_left_child;
+    void cost_complexity_prune(double ccp_alpha) {
+        int iteration = 0;
+        const int MAX_ITERATIONS = 1024;
 
-        NodeWithParent(Node* n, Node* p, bool is_left) : node(n), parent(p), is_left_child(is_left) {}
-    };
+        while (!is_leaf_node(root) && iteration < MAX_ITERATIONS) {
+            iteration++;
+            auto [weakest_node, alpha] = find_global_weakest_link(root);
+
+            if (weakest_node == nullptr || alpha == std::numeric_limits<double>::infinity() || alpha > ccp_alpha) {
+                break;
+            }
+
+            auto [parent, is_left] = find_parent(root, weakest_node);
+
+            prune_node_to_leaf(static_cast<InternalNode*>(weakest_node), parent, is_left);
+        }
+    }
 
     void prune_node_to_leaf(InternalNode* node_to_prune,
         Node* parent,
-        bool is_left_child,
-        const std::vector<DataPoint>& error_data,
-        const std::vector<int>& error_indices) {
+        bool is_left_child) {
 
-        std::vector<int> node_indices = get_indices_for_node(node_to_prune, error_data, error_indices);
-        int sample_count = node_indices.size();
-        auto class_probabilities = calculate_probabilities(error_data, node_indices);
+        int sample_count = node_to_prune->get_sample_count();
+        double node_error = node_to_prune->get_node_error();
+        auto class_probabilities = node_to_prune->get_class_probabilities();
 
-        LeafNode* new_leaf = new LeafNode(class_probabilities, sample_count);
+        LeafNode* new_leaf = new LeafNode(class_probabilities, sample_count, node_error);
 
         if (parent != nullptr) {
             InternalNode* parent_internal = static_cast<InternalNode*>(parent);
@@ -412,10 +405,27 @@ private:
         } else {
             root = new_leaf;
         }
+        node_to_prune->left_child = nullptr;
+        node_to_prune->right_child = nullptr;
 
         delete node_to_prune;
     }
 
+    int count_subtree_leaves(Node* node) {
+        if (node == nullptr) {
+            return 0;
+        }
+        if (dynamic_cast<LeafNode*>(node) != nullptr) {
+            return 1;
+        }
+
+        auto internal_node = dynamic_cast<InternalNode*>(node);
+
+        if (internal_node != nullptr) {
+            return count_subtree_leaves(internal_node->get_left_child()) + count_subtree_leaves(internal_node->get_right_child());
+        }
+        return 0;
+    }
 
     std::pair<Node*, bool> find_parent(Node* root, Node* target) {
         if (root == nullptr || target == nullptr) return {nullptr, false};
@@ -436,164 +446,36 @@ private:
         return {nullptr, false};
     }
 
-    double calculate_prune_metric(Node* node, const std::vector<DataPoint>& error_data,
-                                const std::vector<int>& error_indices, int total_training_samples) {
-        if (dynamic_cast<LeafNode*>(node) != nullptr) {
-            return std::numeric_limits<double>::infinity();
-        }
-
-        if (dynamic_cast<InternalNode*>(node) != nullptr) {
-            std::vector<int> node_indices = get_indices_for_node(node, error_data, error_indices);
-
-            // Защита от маленьких узлов
-            if (node_indices.size() < min_samples_leaf * 2) {
-                return std::numeric_limits<double>::infinity();
-            }
-
-            int T_t = count_subtree_leaves(node);
-
-            // Защита от обрезки маленьких поддеревьев
-            if (T_t <= 2) {
-                return std::numeric_limits<double>::infinity();
-            }
-
-            double weighted_subtree_error = calculate_subtree_error(node, error_data, node_indices, total_training_samples);
-
-            // Расчет ошибки если заменить на лист
-            std::unordered_map<int, int> class_counts;
-            for (int idx : node_indices) {
-                class_counts[error_data[idx].label]++;
-            }
-
-            int majority_class = -1;
-            int max_count = 0;
-            for (const auto& [class_label, count] : class_counts) {
-                if (count > max_count) {
-                    max_count = count;
-                    majority_class = class_label;
-                }
-            }
-
-            double error_if_leaf = 1.0 - (static_cast<double>(max_count) / node_indices.size());
-            double weighted_leaf_error = (static_cast<double>(node_indices.size()) / total_training_samples) * error_if_leaf;
-
-            // Основная формула g_value с масштабированием
-            double epsilon = 1e-10;
-            double g_value = (weighted_leaf_error - weighted_subtree_error + epsilon) / (T_t - 1 + epsilon);
-            g_value *= 2.0;
-            // Масштабирование для работы с разными размерами данных
-            // Защита от отрицательных и слишком маленьких значений
-            if (g_value <= 0) {
-                return std::numeric_limits<double>::infinity();
-            }
-
-            // Минимальное значимое улучшение (0.1% от общего размера)
-            double min_improvement = 0.001;
-            if (g_value < min_improvement) {
-                return std::numeric_limits<double>::infinity();
-            }
-
-            return g_value;
-        }
-
-        return std::numeric_limits<double>::infinity();
-    }
-
-    void cost_complexity_prune(double alpha, const std::vector<DataPoint>& data, const std::vector<int>& indices, int total_training_samples) {
-        if (root == nullptr) return;
-
-        int initial_leaves = count_subtree_leaves(root);
-        if (initial_leaves <= 3) {
-
-            return;
-        }
-
-
-        bool pruned_any;
-        int iteration = 0;
-        const int max_iterations = 100;
-
-        do {
-            pruned_any = false;
-            iteration++;
-
-            // Найти самый слабый узел для обрезки
-            Node* weakest_link = find_weakest_links(root, data, indices, total_training_samples);
-
-            if (weakest_link == nullptr) {
-                break;
-            }
-
-            double g_value = calculate_prune_metric(weakest_link, data, indices, total_training_samples);
-
-
-            if (g_value <= alpha * total_training_samples && g_value != std::numeric_limits<double>::infinity()) {
-                // Найти родителя и обрезать
-                auto [parent, is_left] = find_parent(root, weakest_link);
-
-                if (parent != nullptr) {
-                    prune_node_to_leaf(static_cast<InternalNode*>(weakest_link), parent, is_left, data, indices);
-                    pruned_any = true;
-
-                    int current_leaves = count_subtree_leaves(root);
-
-                }
-            }
-
-            if (iteration >= max_iterations) {
-                break;
-            }
-
-        } while (pruned_any);
-
-        int final_leaves = count_subtree_leaves(root);
-    }
-
-
-    void manual_pruning(const std::vector<DataPoint>& data, double alpha) {
-        std::vector<int> all_indices(data.size());
-        for (int i = 0; i < data.size(); ++i) {
-            all_indices[i] = i;
-        }
-
-        cost_complexity_prune(alpha, data, all_indices, data.size());
-    }
-
     Node* build_tree(const std::vector<DataPoint>& data,
         const std::vector<int>& indices,
         int depth, int total_samples) {
         auto probabilities = calculate_probabilities(data, indices);
 
-        if (indices.size() < min_samples_split) {
-            auto leaf_probabilities = calculate_probabilities(data, indices);
-            return new LeafNode(leaf_probabilities, indices.size());
+        double impurity = 0.0;
+        if (criterion == SplitCriterion::ENTROPY) {
+            impurity = calculate_entropy(data, indices);
+        } else {
+            impurity = calculate_gini(data, indices);
         }
 
-        if (indices.empty()) {
-            auto leaf_probabilities = calculate_probabilities(data, indices);
-            return new LeafNode(leaf_probabilities, indices.size());
-        }
+        double node_error = (static_cast<double>(indices.size()) / total_samples) * impurity;
+        int majority_class = get_majority_class_in_node(data, indices);
 
-        if (all_same_class(data, indices)) {
-            auto leaf_probabilities = calculate_probabilities(data, indices);
-            return new LeafNode(leaf_probabilities, indices.size());
-        }
+        if (indices.size() < min_samples_split ||
+        indices.empty() ||
+        all_same_class(data, indices) ||
+        depth >= max_depth) {
 
-        if (depth >= max_depth) {
-            auto leaf_probabilities = calculate_probabilities(data, indices);
-            return new LeafNode(leaf_probabilities, indices.size());
+            return new LeafNode(probabilities, indices.size(), node_error);  // ← передаем node_error
         }
 
         auto best_split = find_best_split(data, indices);
 
-        if ((best_split.left_indices.size() < min_samples_leaf) || (best_split.right_indices.size() < min_samples_leaf)) {
-            auto leaf_probabilities = calculate_probabilities(data, indices);
-            return new LeafNode(leaf_probabilities, indices.size());
-        }
+        if (best_split.left_indices.size() < min_samples_leaf ||
+        best_split.right_indices.size() < min_samples_leaf ||
+        best_split.information_gain < 0.0) {
 
-        if (best_split.information_gain < 0.0) {
-            auto leaf_probabilities = calculate_probabilities(data, indices);
-            return new LeafNode(leaf_probabilities, indices.size());
+            return new LeafNode(probabilities, indices.size(), node_error);  // ← передаем node_error
         }
 
         int feature_index = best_split.feature_index;
@@ -601,13 +483,13 @@ private:
 
         if  (!feature_importances.empty()) {
             double weight = static_cast<double>(indices.size()) / total_samples;
-            // double old_value = feature_importances[feature_index];
             feature_importances[feature_index] += weight * best_split.information_gain;
         }
 
         auto left_child = build_tree(data, best_split.left_indices, depth + 1, total_samples);
         auto right_child = build_tree(data, best_split.right_indices, depth + 1, total_samples);
-        return new InternalNode(feature_index, threshold, left_child, right_child, indices.size());
+
+        return new InternalNode(feature_index, threshold, left_child, right_child, majority_class, probabilities, indices.size(), node_error);
     }
 
 //=======================================================PUBLIC========================================================================//
@@ -633,22 +515,6 @@ public:
         } else {
             criterion = SplitCriterion::GINI;
         }
-    }
-
-    int count_subtree_leaves(Node* node) {
-        if (node == nullptr) {
-            return 0;
-        }
-        if (dynamic_cast<LeafNode*>(node) != nullptr) {
-            return 1;
-        }
-
-        auto internal_node = dynamic_cast<InternalNode*>(node);
-
-        if (internal_node != nullptr) {
-            return count_subtree_leaves(internal_node->get_left_child()) + count_subtree_leaves(internal_node->get_right_child());
-        }
-        return 0;
     }
 
     std::unordered_map<int, double> predict_proba(const std::vector<double>& features) const {
@@ -700,13 +566,13 @@ public:
         }
 
         if (ccp_alpha > 0.0) {
-            manual_pruning(data, ccp_alpha);
+            cost_complexity_prune(ccp_alpha);
         }
     }
 
     void fit(const std::vector<std::vector<double>>& X, const std::vector<int>& y) {
         if (X.size() != y.size() || X.empty()) {
-            throw std::invalid_argument("Invalid train data.\n");
+            std::cout << "Wrong size of data\n";
         }
 
         std::vector<DataPoint> data;
@@ -717,6 +583,10 @@ public:
         }
 
         fit(data);
+    }
+
+    int get_n_leaves() {
+        return count_subtree_leaves(root);
     }
 
     void set_ccp_alpha(double new_alpha) {

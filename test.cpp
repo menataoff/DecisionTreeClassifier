@@ -1,281 +1,488 @@
 #include <iostream>
 #include <vector>
-#include <random>
-#include <cmath>
 #include <iomanip>
+#include <random>
 #include <algorithm>
-#include <functional>
+#include <fstream>
+#include <cmath>
 #include "decision_tree.h"
 
-std::uniform_real_distribution<double> dist(0.0, 1.0);
+class ExtendedPruningTester {
+private:
+    std::mt19937 gen;
 
-double calculate_accuracy(const DecisionTree& tree, const std::vector<DataPoint>& data) {
-    int correct = 0;
-    for (const auto& point : data) {
-        if (tree.predict(point.features) == point.label) correct++;
-    }
-    return static_cast<double>(correct) / data.size();
-}
+    struct Dataset {
+        std::string name;
+        std::vector<std::vector<double>> X;
+        std::vector<int> y;
+        int n_classes;
+        int n_features;
+    };
 
-int count_leaves(Node* node) {
-    if (!node) return 0;
-    if (dynamic_cast<LeafNode*>(node)) return 1;
-    auto internal = dynamic_cast<InternalNode*>(node);
-    return count_leaves(internal->left_child) + count_leaves(internal->right_child);
-}
+    struct TestMetrics {
+        double train_accuracy;
+        double test_accuracy;
+        int n_leaves;
+        int depth;
+        double inference_time_ms; // Можно добавить замер времени
+    };
 
-std::random_device rd;
-std::mt19937 gen(rd());
+public:
+    ExtendedPruningTester(int seed = 42) : gen(seed) {}
 
-// Функция для автоматического подбора alpha
-double find_optimal_alpha(const std::vector<DataPoint>& train_data,
-                         const std::vector<DataPoint>& val_data,
-                         int max_depth = 20) {
-    std::vector<double> candidate_alphas = {0.0, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.02};
-    double best_alpha = 0.0;
-    double best_score = -1.0;
+    // ==================== РАЗНЫЕ ТИПЫ ДАННЫХ ====================
 
-    std::cout << "Alpha Search: ";
-    for (double alpha : candidate_alphas) {
-        DecisionTree tree(max_depth, 2, 1, "gini", alpha);
-        tree.fit(train_data);
-        double score = calculate_accuracy(tree, val_data);
+    Dataset generate_linearly_separable(int n_samples = 300) {
+        Dataset ds;
+        ds.name = "Linearly Separable";
+        ds.n_classes = 2;
+        ds.n_features = 5;
 
-        std::cout << alpha << "(" << score << ") ";
+        std::normal_distribution<> class0(-1.0, 0.5);
+        std::normal_distribution<> class1(1.0, 0.5);
+        std::uniform_real_distribution<> noise_feat(-0.5, 0.5);
 
-        if (score > best_score) {
-            best_score = score;
-            best_alpha = alpha;
-        }
-    }
-    std::cout << "-> Best: " << best_alpha << " (score: " << best_score << ")" << std::endl;
+        for (int i = 0; i < n_samples; ++i) {
+            std::vector<double> features(5);
 
-    return best_alpha;
-}
+            if (i < n_samples / 2) {
+                // Class 0
+                features[0] = class0(gen);
+                features[1] = class0(gen) * 0.7;
+                y.push_back(0);
+            } else {
+                // Class 1
+                features[0] = class1(gen);
+                features[1] = class1(gen) * 0.7;
+                y.push_back(1);
+            }
 
-// 1. Умеренно зашумленные данные (реалистичный случай)
-std::vector<DataPoint> generate_realistic_data(int samples, int features = 3, double noise = 0.2) {
-    std::random_device rd;
-    std::mt19937 gen(rd());
+            // Noise features
+            for (int j = 2; j < 5; ++j) {
+                features[j] = noise_feat(gen);
+            }
 
-    std::vector<DataPoint> data;
-    for (int i = 0; i < samples; ++i) {
-        std::vector<double> features_vec;
-        double decision_value = 0.0;
-
-        for (int j = 0; j < features; ++j) {
-            double f = dist(gen);
-            features_vec.push_back(f);
-            decision_value += f * (j + 1) * 0.3;
+            ds.X.push_back(features);
         }
 
-        // Нелинейная граница с умеренным шумом
-        int true_label = (decision_value + 0.3 * std::sin(decision_value * 3) > 0.7) ? 1 : 0;
-        if (dist(gen) < noise) {
-            true_label = 1 - true_label;
+        return ds;
+    }
+
+    Dataset generate_xor_pattern(int n_samples = 400) {
+        Dataset ds;
+        ds.name = "XOR Pattern";
+        ds.n_classes = 2;
+        ds.n_features = 3;
+
+        std::normal_distribution<> cluster(0.0, 0.3);
+
+        // 4 кластера как в XOR
+        for (int i = 0; i < n_samples; ++i) {
+            std::vector<double> features(3);
+            int cluster_id = i % 4;
+
+            if (cluster_id == 0) {  // (0,0) → class 0
+                features[0] = cluster(gen) - 1.0;
+                features[1] = cluster(gen) - 1.0;
+                y.push_back(0);
+            }
+            else if (cluster_id == 1) {  // (0,1) → class 1
+                features[0] = cluster(gen) - 1.0;
+                features[1] = cluster(gen) + 1.0;
+                y.push_back(1);
+            }
+            else if (cluster_id == 2) {  // (1,0) → class 1
+                features[0] = cluster(gen) + 1.0;
+                features[1] = cluster(gen) - 1.0;
+                y.push_back(1);
+            }
+            else {  // (1,1) → class 0
+                features[0] = cluster(gen) + 1.0;
+                features[1] = cluster(gen) + 1.0;
+                y.push_back(0);
+            }
+
+            features[2] = std::uniform_real_distribution<>(-0.5, 0.5)(gen);
+            ds.X.push_back(features);
         }
 
-        data.emplace_back(features_vec, true_label);
+        return ds;
     }
-    return data;
-}
 
-// 2. Четко разделимые данные (прунинг не должен сильно менять)
-std::vector<DataPoint> generate_clean_data(int samples) {
-    std::vector<DataPoint> data;
-    for (int i = 0; i < samples; ++i) {
-        double x1 = dist(gen);
-        double x2 = dist(gen);
-        double x3 = dist(gen);
-        // Четкая линейная граница
-        int label = (x1 + 2*x2 - x3 > 1.2) ? 1 : 0;
-        data.emplace_back(std::vector<double>{x1, x2, x3}, label);
+    Dataset generate_multi_class_circles(int n_samples = 500, int n_classes = 4) {
+        Dataset ds;
+        ds.name = "Multi-class Circles";
+        ds.n_classes = n_classes;
+        ds.n_features = 3;
+
+        std::uniform_real_distribution<> angle_dist(0, 2 * M_PI);
+        std::normal_distribution<> noise(0.0, 0.15);
+
+        for (int i = 0; i < n_samples; ++i) {
+            std::vector<double> features(3);
+            int label = i % n_classes;
+            double radius = 1.0 + label * 0.8;  // Разные радиусы
+
+            double angle = angle_dist(gen);
+            features[0] = radius * cos(angle) + noise(gen);
+            features[1] = radius * sin(angle) + noise(gen);
+            features[2] = std::uniform_real_distribution<>(-1.0, 1.0)(gen);
+
+            ds.X.push_back(features);
+            y.push_back(label);
+        }
+
+        return ds;
     }
-    return data;
-}
 
-// 3. Сильно зашумленные данные (прунинг должен помочь)
-std::vector<DataPoint> generate_very_noisy_data(int samples, double noise = 0.35) {
-    std::vector<DataPoint> data;
-    for (int i = 0; i < samples; ++i) {
-        double x1 = dist(gen);
-        double x2 = dist(gen);
-        double x3 = dist(gen);
+    Dataset generate_high_dimensional(int n_samples = 600, int n_features = 20) {
+        Dataset ds;
+        ds.name = "High Dimensional";
+        ds.n_classes = 3;
+        ds.n_features = n_features;
 
-        int true_label = (x1 * x1 + x2 * x2 - x3 > 0.3) ? 1 : 0;
-        // Много шума
-        if (dist(gen) < noise) true_label = 1 - true_label;
+        // Только первые 3 признака информативны
+        std::normal_distribution<> informative(0.0, 1.0);
+        std::uniform_real_distribution<> noise(-1.0, 1.0);
 
-        data.emplace_back(std::vector<double>{x1, x2, x3}, true_label);
+        for (int i = 0; i < n_samples; ++i) {
+            std::vector<double> features(n_features);
+            int label = i % 3;
+
+            // Информативные признаки
+            if (label == 0) {
+                features[0] = informative(gen) - 1.5;
+                features[1] = informative(gen) - 1.0;
+                features[2] = informative(gen) * 0.5;
+            } else if (label == 1) {
+                features[0] = informative(gen) + 0.5;
+                features[1] = informative(gen) + 1.0;
+                features[2] = informative(gen) * 1.5;
+            } else {
+                features[0] = informative(gen) * 2.0;
+                features[1] = informative(gen) * 0.3;
+                features[2] = informative(gen) - 0.5;
+            }
+
+            // Шумовые признаки
+            for (int j = 3; j < n_features; ++j) {
+                features[j] = noise(gen);
+            }
+
+            ds.X.push_back(features);
+            y.push_back(label);
+        }
+
+        return ds;
     }
-    return data;
-}
 
+    Dataset generate_imbalanced_data(int n_samples = 800) {
+        Dataset ds;
+        ds.name = "Imbalanced (90/10)";
+        ds.n_classes = 2;
+        ds.n_features = 4;
 
+        // 90% class 0, 10% class 1
+        std::normal_distribution<> class0_dist(0.0, 1.0);
+        std::normal_distribution<> class1_dist(2.5, 0.8);
 
+        for (int i = 0; i < n_samples; ++i) {
+            std::vector<double> features(4);
 
-void run_alpha_sweep_test(const std::string& test_name,
-                         const std::vector<DataPoint>& train_data,
-                         const std::vector<DataPoint>& test_data,
-                         const std::vector<DataPoint>& val_data) {
+            if (i < n_samples * 0.9) {  // Class 0 (90%)
+                for (int j = 0; j < 4; ++j) {
+                    features[j] = class0_dist(gen);
+                }
+                y.push_back(0);
+            } else {  // Class 1 (10%)
+                for (int j = 0; j < 4; ++j) {
+                    features[j] = class1_dist(gen);
+                }
+                y.push_back(1);
+            }
 
-    std::cout << "\n🎯 " << test_name << std::endl;
-    std::cout << "Data: train=" << train_data.size() << ", val=" << val_data.size()
-              << ", test=" << test_data.size() << std::endl;
+            ds.X.push_back(features);
+        }
 
-    // Автоподбор alpha
-    double optimal_alpha = find_optimal_alpha(train_data, val_data, 15);
+        return ds;
+    }
 
-    // Сравнение с разными alpha
-    std::vector<double> alphas = {0.0, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.02};
+    // ==================== ТЕСТОВЫЕ ФУНКЦИИ ====================
 
-    std::cout << "\nAlpha\tLeaves\tTrain\tTest\tImprove\tStability" << std::endl;
-    std::cout << "-----\t------\t----\t----\t-------\t---------" << std::endl;
+    std::pair<std::vector<std::vector<double>>, std::vector<std::vector<double>>>
+    split_data(const std::vector<std::vector<double>>& X, const std::vector<int>& y,
+               double test_size = 0.25) {
+        std::vector<int> indices(X.size());
+        std::iota(indices.begin(), indices.end(), 0);
+        std::shuffle(indices.begin(), indices.end(), gen);
 
-    double baseline_test = 0.0;
+        int split_idx = static_cast<int>(X.size() * (1.0 - test_size));
 
-    for (double alpha : alphas) {
-        DecisionTree tree(15, 2, 1, "gini", alpha);
-        tree.fit(train_data);
+        std::vector<std::vector<double>> X_train, X_test;
+        std::vector<int> y_train, y_test;
 
-        int leaves = count_leaves(tree.get_root());
-        double train_acc = calculate_accuracy(tree, train_data);
-        double test_acc = calculate_accuracy(tree, test_data);
+        for (int i = 0; i < split_idx; ++i) {
+            X_train.push_back(X[indices[i]]);
+            y_train.push_back(y[indices[i]]);
+        }
+        for (int i = split_idx; i < X.size(); ++i) {
+            X_test.push_back(X[indices[i]]);
+            y_test.push_back(y[indices[i]]);
+        }
 
-        if (alpha == 0.0) baseline_test = test_acc;
+        return {{X_train, X_test}, {y_train, y_test}};
+    }
 
-        double improvement = test_acc - baseline_test;
-        double stability = (train_acc - test_acc); // Меньше = стабильнее
+    TestMetrics evaluate_tree(const Dataset& ds, double ccp_alpha,
+                             const std::string& criterion = "gini",
+                             int max_depth = 20,
+                             int min_samples_split = 2,
+                             int min_samples_leaf = 1) {
 
-        std::cout << std::fixed << std::setprecision(3);
-        std::cout << alpha << "\t" << leaves << "\t" << train_acc
-                  << "\t" << test_acc << "\t"
-                  << (improvement > 0 ? "+" : "") << improvement << "\t"
-                  << stability;
+        auto [X_split, y_split] = split_data(ds.X, ds.y, 0.25);
+        auto& X_train = X_split[0];
+        auto& X_test = X_split[1];
+        auto& y_train = y_split[0];
+        auto& y_test = y_split[1];
 
-        if (alpha == optimal_alpha) std::cout << " *OPTIMAL*";
-        if (alpha == 0.0) std::cout << " *BASELINE*";
+        DecisionTree tree(max_depth, min_samples_split, min_samples_leaf,
+                         criterion, ccp_alpha);
+        tree.fit(X_train, y_train);
+
+        TestMetrics metrics;
+        metrics.n_leaves = tree.get_n_leaves();
+
+        // Calculate accuracies
+        auto calculate_accuracy = [&](const auto& X, const auto& y) {
+            int correct = 0;
+            for (size_t i = 0; i < X.size(); ++i) {
+                if (tree.predict(X[i]) == y[i]) correct++;
+            }
+            return 100.0 * correct / X.size();
+        };
+
+        metrics.train_accuracy = calculate_accuracy(X_train, y_train);
+        metrics.test_accuracy = calculate_accuracy(X_test, y_test);
+
+        return metrics;
+    }
+
+    void run_dataset_test(const Dataset& ds, const std::string& test_name) {
+        std::cout << "\n" << std::string(70, '=') << std::endl;
+        std::cout << " DATASET: " << ds.name << std::endl;
+        std::cout << " Features: " << ds.n_features << ", Classes: " << ds.n_classes;
+        std::cout << ", Samples: " << ds.X.size() << std::endl;
+        std::cout << std::string(70, '=') << std::endl;
+
+        std::vector<double> alphas = {0.0, 0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5};
+
+        std::cout << "\nAlpha     | Leaves | Train Acc | Test Acc  | Gap     | Effect\n";
+        std::cout << "----------|--------|-----------|-----------|---------|--------\n";
+
+        std::vector<std::pair<double, TestMetrics>> results;
+
+        for (double alpha : alphas) {
+            TestMetrics metrics = evaluate_tree(ds, alpha);
+            results.push_back({alpha, metrics});
+
+            double overfit_gap = metrics.train_accuracy - metrics.test_accuracy;
+
+            std::cout << std::fixed << std::setprecision(3);
+            std::cout << std::setw(9) << alpha << " | "
+                      << std::setw(6) << metrics.n_leaves << " | "
+                      << std::setw(9) << metrics.train_accuracy << "% | "
+                      << std::setw(9) << metrics.test_accuracy << "% | "
+                      << std::setw(7) << overfit_gap << "% | ";
+
+            // Analyze pruning effect
+            if (alpha == 0.0) {
+                std::cout << "Baseline";
+            } else {
+                auto& prev = results[results.size()-2].second;
+                double acc_change = metrics.test_accuracy - prev.test_accuracy;
+                int leaves_change = prev.n_leaves - metrics.n_leaves;
+
+                if (leaves_change > 0 && acc_change >= -1.0) {
+                    std::cout << "GOOD (leaves-" << leaves_change << ", acc"
+                              << (acc_change >= 0 ? "+" : "") << acc_change << "%)";
+                } else if (leaves_change > 0 && acc_change < -5.0) {
+                    std::cout << "OVER-PRUNED";
+                } else if (leaves_change == 0) {
+                    std::cout << "No effect";
+                } else {
+                    std::cout << "Mixed";
+                }
+            }
+            std::cout << std::endl;
+        }
+
+        // Find best alpha (max test accuracy with reasonable size)
+        auto best_it = std::max_element(results.begin(), results.end(),
+            [](const auto& a, const auto& b) {
+                double score_a = a.second.test_accuracy - 0.1 * a.second.n_leaves;
+                double score_b = b.second.test_accuracy - 0.1 * b.second.n_leaves;
+                return score_a < score_b;
+            });
+
+        std::cout << "\n[ANALYSIS] Best alpha: " << best_it->first
+                  << " (Test Acc: " << best_it->second.test_accuracy
+                  << "%, Leaves: " << best_it->second.n_leaves << ")\n";
+
+        auto& baseline = results[0].second;
+        auto& best = best_it->second;
+
+        std::cout << "[IMPROVEMENT] Test accuracy: " << baseline.test_accuracy
+                  << "% → " << best.test_accuracy << "% ";
+        if (best.test_accuracy > baseline.test_accuracy) {
+            std::cout << "(+" << (best.test_accuracy - baseline.test_accuracy) << "%) ";
+        }
+        std::cout << "| Leaves: " << baseline.n_leaves << " → " << best.n_leaves
+                  << " (-" << (100.0 * (baseline.n_leaves - best.n_leaves) / baseline.n_leaves) << "%)";
+
+        if (best.test_accuracy > baseline.test_accuracy && best.n_leaves < baseline.n_leaves) {
+            std::cout << " ✓ EXCELLENT";
+        } else if (best.test_accuracy >= baseline.test_accuracy - 2.0 && best.n_leaves < baseline.n_leaves * 0.5) {
+            std::cout << " ✓ GOOD";
+        }
         std::cout << std::endl;
     }
-}
 
-void test_realistic_scenario() {
-    auto train_data = generate_realistic_data(400, 3, 0.15);
-    auto val_data = generate_realistic_data(100, 3, 0.15);
-    auto test_data = generate_realistic_data(200, 3, 0.15);
+    void run_gini_vs_entropy_test(const Dataset& ds) {
+        std::cout << "\n" << std::string(70, '=') << std::endl;
+        std::cout << " CRITERION COMPARISON: Gini vs Entropy" << std::endl;
+        std::cout << " Dataset: " << ds.name << std::endl;
+        std::cout << std::string(70, '=') << std::endl;
 
-    run_alpha_sweep_test("REALISTIC DATA (15% noise, 3 features)",
-                        train_data, test_data, val_data);
-}
+        std::cout << "\nAlpha     | Criterion | Leaves | Train Acc | Test Acc  | Gap\n";
+        std::cout << "----------|-----------|--------|-----------|-----------|-----\n";
 
-void test_clean_data_scenario() {
-    auto train_data = generate_clean_data(300);
-    auto val_data = generate_clean_data(100);
-    auto test_data = generate_clean_data(150);
+        std::vector<double> alphas = {0.0, 0.01, 0.05, 0.1};
 
-    run_alpha_sweep_test("CLEAN DATA (Well-separable)",
-                        train_data, test_data, val_data);
-}
+        for (double alpha : alphas) {
+            for (const auto& criterion : {"gini", "entropy"}) {
+                TestMetrics metrics = evaluate_tree(ds, alpha, criterion);
+                double gap = metrics.train_accuracy - metrics.test_accuracy;
 
-void test_noisy_data_scenario() {
-    auto train_data = generate_very_noisy_data(350, 0.3);
-    auto val_data = generate_very_noisy_data(100, 0.3);
-    auto test_data = generate_very_noisy_data(175, 0.3);
-
-    run_alpha_sweep_test("NOISY DATA (30% noise, prone to overfit)",
-                        train_data, test_data, val_data);
-}
-
-void test_different_depths() {
-    std::cout << "\n🌳 DEPTH SENSITIVITY ANALYSIS" << std::endl;
-
-    auto train_data = generate_realistic_data(300, 3, 0.2);
-    auto val_data = generate_realistic_data(100, 3, 0.2);
-    auto test_data = generate_realistic_data(150, 3, 0.2);
-
-    std::vector<int> depths = {5, 10, 15, 20, 30};
-
-    std::cout << "Depth\tBestAlpha\tLeavesNoPrune\tLeavesPruned\tTestNoPrune\tTestPruned\tGain" << std::endl;
-    std::cout << "-----\t---------\t------------\t-----------\t-----------\t----------\t----" << std::endl;
-
-    for (int depth : depths) {
-        // Без прунинга
-        DecisionTree no_prune(depth, 2, 1, "gini", 0.0);
-        no_prune.fit(train_data);
-        double no_prune_test = calculate_accuracy(no_prune, test_data);
-        int no_prune_leaves = count_leaves(no_prune.get_root());
-
-        // С автоподбором alpha
-        double best_alpha = find_optimal_alpha(train_data, val_data, depth);
-        DecisionTree pruned(depth, 2, 1, "gini", best_alpha);
-        pruned.fit(train_data);
-        double pruned_test = calculate_accuracy(pruned, test_data);
-        int pruned_leaves = count_leaves(pruned.get_root());
-
-        double gain = pruned_test - no_prune_test;
-
-        std::cout << depth << "\t" << best_alpha << "\t\t"
-                  << no_prune_leaves << "\t\t" << pruned_leaves << "\t\t"
-                  << std::fixed << std::setprecision(3) << no_prune_test << "\t"
-                  << pruned_test << "\t" << (gain > 0 ? "+" : "") << gain << std::endl;
-    }
-}
-
-void test_alpha_distribution() {
-    std::cout << "\n📊 ALPHA DISTRIBUTION ACROSS MULTIPLE RUNS" << std::endl;
-
-    std::vector<double> all_selected_alphas;
-    int runs = 10;
-
-    for (int i = 0; i < runs; ++i) {
-        auto train_data = generate_realistic_data(300, 3, 0.15 + (i * 0.02));
-        auto val_data = generate_realistic_data(100, 3, 0.15 + (i * 0.02));
-
-        double best_alpha = find_optimal_alpha(train_data, val_data, 15);
-        all_selected_alphas.push_back(best_alpha);
+                std::cout << std::fixed << std::setprecision(3);
+                std::cout << std::setw(9) << alpha << " | "
+                          << std::setw(9) << criterion << " | "
+                          << std::setw(6) << metrics.n_leaves << " | "
+                          << std::setw(9) << metrics.train_accuracy << "% | "
+                          << std::setw(9) << metrics.test_accuracy << "% | "
+                          << std::setw(5) << gap << "%\n";
+            }
+        }
     }
 
-    // Статистика по выбранным alpha
-    std::sort(all_selected_alphas.begin(), all_selected_alphas.end());
-    double median = all_selected_alphas[runs / 2];
-    double mean = std::accumulate(all_selected_alphas.begin(), all_selected_alphas.end(), 0.0) / runs;
+    void run_depth_impact_test(const Dataset& ds) {
+        std::cout << "\n" << std::string(70, '=') << std::endl;
+        std::cout << " MAX DEPTH IMPACT ON PRUNING" << std::endl;
+        std::cout << " Dataset: " << ds.name << std::endl;
+        std::cout << std::string(70, '=') << std::endl;
 
-    std::cout << "Alpha Statistics over " << runs << " runs:" << std::endl;
-    std::cout << "Min: " << *std::min_element(all_selected_alphas.begin(), all_selected_alphas.end()) << std::endl;
-    std::cout << "Max: " << *std::max_element(all_selected_alphas.begin(), all_selected_alphas.end()) << std::endl;
-    std::cout << "Mean: " << mean << std::endl;
-    std::cout << "Median: " << median << std::endl;
-    std::cout << "Typical sklearn range: 0.0001 - 0.02" << std::endl;
+        std::cout << "\nDepth | Alpha | Leaves | Train Acc | Test Acc  | Overfit\n";
+        std::cout << "------|-------|--------|-----------|-----------|--------\n";
 
-    // Проверка что alpha в разумном диапазоне
-    bool in_sklearn_range = (median >= 0.0001 && median <= 0.02);
-    std::cout << "In sklearn range: " << (in_sklearn_range ? "✅ YES" : "❌ NO") << std::endl;
-}
+        std::vector<int> depths = {3, 5, 10, 20, 50};
+        std::vector<double> alphas = {0.0, 0.01, 0.05};
 
-void summary_analysis() {
-    std::cout << "\n📈 FINAL ANALYSIS" << std::endl;
-    std::cout << "=================" << std::endl;
-    std::cout << "✅ Alpha Range: Should be 0.0001 - 0.02 (sklearn-compatible)" << std::endl;
-    std::cout << "✅ Stability: Pruning should reduce overfitting (train-test gap)" << std::endl;
-    std::cout << "✅ Improvement: Should improve or maintain test accuracy" << std::endl;
-    std::cout << "✅ Reasonable Reduction: 20-60% leaves removed, not 90%" << std::endl;
-    std::cout << "🎯 Goal: Alpha selection should be consistent and meaningful" << std::endl;
-}
+        for (int depth : depths) {
+            for (double alpha : alphas) {
+                TestMetrics metrics = evaluate_tree(ds, alpha, "gini", depth);
+                double overfit = metrics.train_accuracy - metrics.test_accuracy;
+
+                std::cout << std::fixed << std::setprecision(1);
+                std::cout << std::setw(5) << depth << " | "
+                          << std::setw(5) << alpha << " | "
+                          << std::setw(6) << metrics.n_leaves << " | "
+                          << std::setw(9) << metrics.train_accuracy << "% | "
+                          << std::setw(9) << metrics.test_accuracy << "% | "
+                          << std::setw(6) << overfit << "%";
+
+                if (alpha > 0.0 && overfit < 10.0) {
+                    std::cout << " ✓";
+                }
+                std::cout << std::endl;
+            }
+            std::cout << "------|-------|--------|-----------|-----------|--------\n";
+        }
+    }
+
+    void run_min_samples_test(const Dataset& ds) {
+        std::cout << "\n" << std::string(70, '=') << std::endl;
+        std::cout << " MIN SAMPLES IMPACT" << std::endl;
+        std::cout << " Dataset: " << ds.name << std::endl;
+        std::cout << std::string(70, '=') << std::endl;
+
+        std::vector<std::pair<int, int>> samples_config = {
+            {2, 1}, {5, 3}, {10, 5}, {20, 10}
+        };
+
+        std::cout << "\nMinSplit/MinLeaf | Alpha | Leaves | Train Acc | Test Acc\n";
+        std::cout << "-----------------|-------|--------|-----------|----------\n";
+
+        for (auto [min_split, min_leaf] : samples_config) {
+            for (double alpha : {0.0, 0.05}) {
+                DecisionTree tree(20, min_split, min_leaf, "gini", alpha);
+
+                auto [X_split, y_split] = split_data(ds.X, ds.y, 0.25);
+                tree.fit(X_split[0], y_split[0]);
+
+                auto calculate_accuracy = [&](const auto& X, const auto& y) {
+                    int correct = 0;
+                    for (size_t i = 0; i < X.size(); ++i) {
+                        if (tree.predict(X[i]) == y[i]) correct++;
+                    }
+                    return 100.0 * correct / X.size();
+                };
+
+                double train_acc = calculate_accuracy(X_split[0], y_split[0]);
+                double test_acc = calculate_accuracy(X_split[1], y_split[1]);
+
+                std::cout << std::setw(8) << min_split << "/"
+                          << std::setw(7) << min_leaf << " | "
+                          << std::setw(5) << alpha << " | "
+                          << std::setw(6) << tree.get_n_leaves() << " | "
+                          << std::fixed << std::setprecision(1)
+                          << std::setw(9) << train_acc << "% | "
+                          << std::setw(8) << test_acc << "%\n";
+            }
+        }
+    }
+
+    void run_all_tests() {
+        std::cout << "EXTENDED DECISION TREE PRUNING TEST SUITE\n";
+        std::cout << "==========================================\n";
+
+        // 1. Основные тесты на разных датасетах
+        std::vector<Dataset> datasets = {
+            generate_linearly_separable(),
+            generate_xor_pattern(),
+            generate_multi_class_circles(),
+            generate_high_dimensional(),
+            generate_imbalanced_data()
+        };
+
+        for (size_t i = 0; i < datasets.size(); ++i) {
+            std::cout << "\n\nTEST SET " << (i+1) << "/" << datasets.size();
+            run_dataset_test(datasets[i], "Dataset_" + std::to_string(i+1));
+
+            // Дополнительные тесты для первых 2 датасетов
+            if (i < 2) {
+                run_gini_vs_entropy_test(datasets[i]);
+                run_depth_impact_test(datasets[i]);
+                run_min_samples_test(datasets[i]);
+            }
+        }
+
+        std::cout << "\n\n" << std::string(80, '=') << std::endl;
+        std::cout << " ALL TESTS COMPLETED SUCCESSFULLY" << std::endl;
+        std::cout << std::string(80, '=') << std::endl;
+    }
+};
 
 int main() {
-    std::cout << "🧪 COMPREHENSIVE ALPHA VALIDATION TEST SUITE" << std::endl;
-    std::cout << "Testing alpha range consistency and pruning effectiveness" << std::endl;
-    std::cout << "==========================================================" << std::endl;
-
-    test_realistic_scenario();
-    test_clean_data_scenario();
-    test_noisy_data_scenario();
-    test_different_depths();
-    test_alpha_distribution();
-    summary_analysis();
-
-    std::cout << "\n🎉 ALPHA VALIDATION COMPLETED!" << std::endl;
-    std::cout << "Check if alpha values are sklearn-compatible and pruning is meaningful." << std::endl;
-
+    ExtendedPruningTester tester(42);
+    tester.run_all_tests();
     return 0;
 }
